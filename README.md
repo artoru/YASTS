@@ -205,7 +205,7 @@ Tuning tips:
 
 If a window repeatedly fails (even at size 1), run with:
 
-    python -m subtitle_translator.translate_srt --log-level DEBUG ...
+    python -m yasts.py --log-level DEBUG ...
 
 YASTS logs:
 - which group IDs were in the focus window
@@ -219,14 +219,6 @@ Example:
     {"line":"... mutta "valta" on ..."}
 
 YASTS includes a targeted repair step that escapes quotes inside `"line"` fields automatically.
-
----
-
-## Model compatibility notes
-
-- TranslateGemma: primary target, tested
-- Llama 3–based models: tested and generally work well
-- Qwen: likely compatible, but not tested — please open an issue if you try it
 
 ---
 
