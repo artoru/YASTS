@@ -148,6 +148,18 @@ Notes:
 
 ---
 
+### Batch mode (folder crawler)
+
+`yasts_folder.py` scans a directory tree for source-language `.srt` files and translates them by invoking `yasts.py` per file.  
+It skips items that already have a target subtitle, can optionally require a corresponding video file, and supports `--dry-run`.
+
+Any arguments after `--` are passed through verbatim to `yasts.py`:
+
+    python3 yasts_folder.py /path/to/media --src-tag en --tgt-tag fi --skip-hi --require-video -- \
+      --src-lang English --tgt-lang Finnish --url http://127.0.0.1:8080/completion --concurrency 4
+
+---
+
 ## Defaults and tuning
 
 YASTS ships with sane defaults in `config.py`, and all of them can be overridden via CLI parameters.
@@ -220,7 +232,7 @@ YASTS includes a targeted repair step that escapes quotes inside `"line"` fields
 
 ## License
 
-MIT © 2025 [ArtoRu](https://github.com/artoru). See `LICENSE`.
+MIT © 2026 [ArtoRu](https://github.com/artoru). See `LICENSE`.
 
 ---
 
