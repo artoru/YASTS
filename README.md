@@ -91,7 +91,7 @@ Python dependencies are lightweight (see `requirements.txt`).
 
 ## Install
 
-Recommended (virtualenv + pip):
+Virtualenv + pip:
 
     python3 -m venv .venv
     source .venv/bin/activate
@@ -100,9 +100,7 @@ Recommended (virtualenv + pip):
 Ubuntu/Debian alternative (system package):
 
     sudo apt update
-    sudo apt install -y python3-httpx
-
-Note: the apt package installs `httpx` system-wide. If you plan to contribute or pin versions, the virtualenv method is recommended.
+    sudo apt install -y python3-httpx python3-charset-normalizer
 
 ---
 
@@ -134,7 +132,7 @@ On a system with **2× RTX 5060 Ti 16GB**, the following `llama.cpp` server para
 
 Translate an SRT file:
 
-    python -m yasts.py \
+    python3 yasts.py \
       input.en.srt \
       output.fi.srt \
       --src-lang English \
@@ -231,7 +229,6 @@ MIT © 2026 [ArtoRu](https://github.com/artoru). See `LICENSE`.
 ## Contributing
 
 Issues and PRs welcome:
-- model compatibility reports (especially Qwen)
 - better wrapping heuristics
 - improved prompt templates for additional models
 - performance profiling results and tuning tips

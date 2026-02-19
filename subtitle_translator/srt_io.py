@@ -3,7 +3,10 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from pathlib import Path
 from typing import List, Optional
+
+from charset_normalizer import from_bytes
 
 _TS_RE = re.compile(
     r"^(?P<start>\d{2}:\d{2}:\d{2},\d{3})\s*-->\s*(?P<end>\d{2}:\d{2}:\d{2},\d{3})"
@@ -28,18 +31,39 @@ def _split_blocks(text: str) -> List[str]:
     return re.split(r"\n\s*\n+", text)
 
 
+def _to_text(x) -> str:
+    # charset-normalizer APIs may return either str or bytes depending on version/usages.
+    if isinstance(x, str):
+        return x
+    if isinstance(x, (bytes, bytearray)):
+        # If we got bytes, best effort decode as UTF-8 with replacement.
+        return bytes(x).decode("utf-8", errors="replace")
+    return str(x)
+
+
+def _read_text(path: str) -> str:
+    data = Path(path).read_bytes()
+
+    match = from_bytes(data).best()
+    if match is None:
+        # Extremely rare; safe fallback
+        return data.decode("utf-8", errors="replace")
+
+    # Prefer .output() but normalize to str in case it isn't
+    raw = match.output()
+    return _to_text(raw)
+
+
 def parse_srt(path: str) -> List[Cue]:
     """
     Parse an .srt file into cues.
 
-    Tolerant behavior:
-    - Accepts missing/incorrect numeric indices (we'll renumber on write).
-    - Keeps timestamps as strings.
-    - Keeps cue text lines as-is (trim only line endings).
-    - Allows trailing timestamp settings after end time.
+    - Decoding: charset-normalizer (best-guess) from raw bytes.
+    - Tolerant parsing: missing/incorrect numeric indices are tolerated.
+    - Trailing cue settings after timestamp are allowed.
     """
-    with open(path, "r", encoding="utf-8-sig") as f:
-        raw = f.read()
+    
+    raw = _read_text(path)
 
     cues: List[Cue] = []
     blocks = _split_blocks(raw)
