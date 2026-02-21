@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 
 _CODE_FENCE_RE = re.compile(r"^```(?:json)?\s*|\s*```$", re.IGNORECASE)
@@ -34,7 +34,7 @@ def strip_json_comments(s: str) -> str:
 
 def find_first_json_substring(s: str) -> Optional[str]:
     """
-    Find the first valid JSON object/array substring by bracket matching.
+    Find the first plausible JSON object/array substring by bracket matching.
     Returns substring or None if nothing plausible found.
     """
     s = s.strip()
@@ -52,7 +52,7 @@ def find_first_json_substring(s: str) -> Optional[str]:
             start = i
             open_ch = "["
             break
-    if start is None:
+    if start is None or open_ch is None:
         return None
 
     close_ch = "}" if open_ch == "{" else "]"
@@ -110,7 +110,7 @@ def _repair_unescaped_quotes_in_line_fields(s: str) -> Tuple[str, int]:
     Returns: (repaired_string, num_repairs_made)
     """
     repairs = 0
-    out_parts = []
+    out_parts: List[str] = []
     pos = 0
 
     while True:
@@ -126,7 +126,7 @@ def _repair_unescaped_quotes_in_line_fields(s: str) -> Tuple[str, int]:
         i = m.end()  # position just after the opening quote
 
         # Now we're inside the "line" string value
-        buf = []
+        buf: List[str] = []
         while i < len(s):
             ch = s[i]
 
@@ -171,14 +171,63 @@ def _loads_object(s: str) -> Dict[str, Any]:
     return obj
 
 
+def _balance_json_delimiters(s: str) -> str:
+    """
+    If JSON appears truncated at the end (missing closing } or ]),
+    append the necessary closing delimiters.
+
+    Conservative:
+      - Tracks nesting for { } and [ ] outside of strings.
+      - Only appends closers if needed.
+      - If the string ends inside a JSON string literal, does nothing.
+      - If it sees mismatched closers, does nothing.
+    """
+    stack: List[str] = []
+    in_str = False
+    esc = False
+
+    for ch in s:
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+            continue
+
+        if ch == '"':
+            in_str = True
+            continue
+
+        if ch == "{":
+            stack.append("}")
+        elif ch == "[":
+            stack.append("]")
+        elif ch in ("}", "]"):
+            if stack and ch == stack[-1]:
+                stack.pop()
+            else:
+                # mismatched closer -> don't try to fix
+                return s
+
+    # if ended inside a string, don't guess
+    if in_str or not stack:
+        return s
+
+    return s + "".join(reversed(stack))
+
+
 def parse_model_json(model_text: str) -> Dict[str, Any]:
     """
-    Robust JSON parse for local model output:
+    Robust JSON parse for model output:
     - strip wrappers/code fences
     - remove // comments
     - try parse whole text
+    - else: try appending missing closing braces/brackets to full text
     - else: extract first JSON substring and parse
-    - else: repair unescaped quotes inside "line" fields and parse again
+    - else: try appending missing closing braces/brackets to substring
+    - else: repair unescaped quotes inside "line" fields (+ balance again)
     """
     s = _strip_wrappers(model_text)
     s = strip_json_comments(s)
@@ -189,21 +238,117 @@ def parse_model_json(model_text: str) -> Dict[str, Any]:
     except json.JSONDecodeError:
         pass
     except Exception:
-        # Non-decode errors (e.g., not an object) should still try substring path
+        # still try repair/substring route
         pass
+
+    # 1b) Try delimiter balancing on FULL text (fixes missing final top-level } / ])
+    balanced_full = _balance_json_delimiters(s)
+    if balanced_full != s:
+        try:
+            return _loads_object(balanced_full)
+        except json.JSONDecodeError:
+            pass
+        except Exception:
+            pass
 
     # 2) Try substring parse
     sub = find_first_json_substring(s)
     if not sub:
-        # Re-raise the most recent exception by attempting once more (will throw)
+        # last attempt: raise a useful error from original cleaned string
         return _loads_object(s)
 
     try:
         return _loads_object(sub)
-    except json.JSONDecodeError as e:
-        # 3) Attempt targeted repair for unescaped quotes in "line" fields
-        repaired, repairs = _repair_unescaped_quotes_in_line_fields(sub)
-        if repairs > 0:
-            return _loads_object(repaired)
-        # Nothing repaired; re-raise original decode error
-        raise e
+    except json.JSONDecodeError:
+        pass
+
+    # 3) Try delimiter balancing on substring (missing final } / ])
+    balanced = _balance_json_delimiters(sub)
+    if balanced != sub:
+        try:
+            return _loads_object(balanced)
+        except json.JSONDecodeError:
+            pass
+
+    # 4) Repair unescaped quotes inside "line" fields, then balance again
+    repaired, repairs = _repair_unescaped_quotes_in_line_fields(sub)
+    if repairs > 0:
+        repaired2 = _balance_json_delimiters(repaired)
+        return _loads_object(repaired2)
+
+    # last: raise
+    return _loads_object(sub)
+
+
+# ---------------------------
+# Language-agnostic extraction helpers
+# ---------------------------
+
+def extract_group_translations(
+    obj: Dict[str, Any],
+    expected_focus_ids: Iterable[int],
+    *,
+    translations_key: str = "translations",
+) -> Dict[int, str]:
+    """
+    Extract {group_id: translated_line} from model JSON WITHOUT depending on key names.
+
+    Some models translate/rename schema keys (e.g. "group_id" -> "group_määrä").
+    This finds the group id by matching ANY integer value against expected_focus_ids.
+
+    Rules per translation object:
+      - group_id: first int value that is in expected_focus_ids
+      - line: prefer value under key "line" if it is a string; otherwise first string value
+    """
+    expected = set(int(x) for x in expected_focus_ids)
+    out: Dict[int, str] = {}
+
+    translations = obj.get(translations_key)
+    if not isinstance(translations, list):
+        return out
+
+    for item in translations:
+        if not isinstance(item, dict):
+            continue
+
+        gid: Optional[int] = None
+        line: Optional[str] = None
+
+        v_line = item.get("line")
+        if isinstance(v_line, str):
+            line = v_line
+
+        # language-agnostic group id resolution
+        for v in item.values():
+            if isinstance(v, int) and v in expected:
+                gid = v
+                break
+
+        if line is None:
+            for v in item.values():
+                if isinstance(v, str):
+                    line = v
+                    break
+
+        if gid is not None and line is not None:
+            out[gid] = line
+
+    return out
+
+
+def get_returned_ids_and_missing(
+    obj: Dict[str, Any],
+    expected_focus_ids: Sequence[int],
+    *,
+    translations_key: str = "translations",
+) -> Tuple[List[int], List[int], Dict[int, str]]:
+    """
+    Convenience helper for validation.
+
+    Returns:
+      (returned_ids_sorted, missing_ids, mapping)
+    """
+    mapping = extract_group_translations(obj, expected_focus_ids, translations_key=translations_key)
+    returned_ids = sorted(mapping.keys())
+    missing = [i for i in expected_focus_ids if i not in mapping]
+    return returned_ids, missing, mapping

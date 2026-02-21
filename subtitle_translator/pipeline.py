@@ -7,7 +7,7 @@ import time
 from typing import Any, Dict, List, Optional, Tuple
 
 from .config import Settings
-from .json_parse import parse_model_json
+from .json_parse import parse_model_json, get_returned_ids_and_missing
 from .llama_client import call_llama_with_retries
 from .prompts import build_system_prompt, render_prompt, render_user_json
 from .splitback import split_group_translation_to_positions
@@ -48,18 +48,6 @@ def _shrink_list(xs: List[Any], factor: float = 0.5) -> List[Any]:
         return xs
     new_len = max(1, int(len(xs) * factor))
     return xs[:new_len]
-
-
-def _extract_returned_group_ids(model_json: Dict[str, Any]) -> List[int]:
-    tr = model_json.get("translations")
-    if not isinstance(tr, list):
-        return []
-    out: List[int] = []
-    for x in tr:
-        if isinstance(x, dict) and isinstance(x.get("group_id"), int):
-            out.append(int(x["group_id"]))
-    return out
-
 
 def _extract_llama_token_stats(raw: Any) -> tuple[int, int, float] | None:
     if not isinstance(raw, dict):
@@ -169,13 +157,20 @@ async def _translate_focus_window(
         raise
 
     try:
-        focus_lines_by_gid = validate_focus_by_group_ids(
-            expected_focus_ids,
+        returned_ids, missing_ids, focus_lines_by_gid = get_returned_ids_and_missing(
             model_json,
-            allow_extra=True,
+            expected_focus_ids,
         )
+
+        if missing_ids:
+            raise ValueError(f"missing focus group_ids={missing_ids}")
+
     except Exception as e:
-        returned_ids = _extract_returned_group_ids(model_json)
+        # Use language-agnostic returned-id extraction for logging too
+        returned_ids, _, _ = get_returned_ids_and_missing(
+            model_json,
+            expected_focus_ids,
+        )
         logger.error(
             "Validation failed. expected_focus_ids=%s returned_ids=%s content_head=%s err=%r",
             sorted(expected_focus_ids),
