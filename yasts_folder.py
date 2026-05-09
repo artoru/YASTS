@@ -27,7 +27,7 @@ def iter_candidates(root: Path, src_tag: str, hi_tag: str, skip_hi: bool) -> Ite
     hi_b = f".{hi_tag}.{src_tag}.srt"  # hi.en.srt
     plain = f".{src_tag}.srt"          # en.srt
 
-    for srt_path in root.rglob("*.srt"):
+    for srt_path in sorted(root.rglob("*.srt")):
         name = srt_path.name
 
         # more specific first
@@ -78,10 +78,12 @@ def has_matching_video(dir_path: Path, prefix: str, video_exts: Sequence[str]) -
 
 def find_existing_target_sub(dir_path: Path, prefix: str, tgt_tag: str, hi_tag: str) -> Path | None:
     """
-    Return an existing target subtitle path (first match) if any exist:
+    Return an existing non-AI target subtitle path (first match) if any exist:
       - prefix.<tgt>.srt
       - prefix.<hi>.<tgt>.srt
       - prefix.<tgt>.<hi>.srt
+
+    AI-tagged outputs are checked separately via build_output_path()/out_path.exists().
     """
     variants = (
         dir_path / f"{prefix}.{tgt_tag}.srt",
@@ -121,10 +123,12 @@ def build_parser() -> argparse.ArgumentParser:
             "  - prefix.<src-tag>.<hi-tag>.srt\n"
             "  - prefix.<hi-tag>.<src-tag>.srt\n"
             "\n"
-            "Skip if any target subtitle already exists:\n"
+            "Skip if any non-AI target subtitle already exists (unless --force-target-existing is used):\n"
             "  - prefix.<tgt-tag>.srt\n"
             "  - prefix.<hi-tag>.<tgt-tag>.srt\n"
             "  - prefix.<tgt-tag>.<hi-tag>.srt\n"
+            "\n"
+            "AI-tagged outputs are always checked separately and will still be skipped if present.\n"
             "\n"
             "Passing args to yasts.py:\n"
             "  Recommended: use `--` to separate crawler args from translator args.\n"
@@ -141,6 +145,26 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--tgt-tag", default="fi", help="Target language tag used in filenames (e.g. fi, sv, de).")
     p.add_argument("--hi-tag", default="hi", help="Hearing-impaired tag used in filenames.")
     p.add_argument("--ai-tag", default="ai", help='Optional output marker tag. Use --ai-tag "" to disable.')
+
+    p.add_argument(
+        "--force-target-existing",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "If enabled, translate even when a non-AI target subtitle already exists. "
+            "AI-tagged output files are still checked and skipped if present, unless --overwrite-ai-existing is used."
+        ),
+    )
+
+    p.add_argument(
+        "--overwrite-ai-existing",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "If enabled, overwrite AI-tagged output subtitle files when they already exist. "
+            "This does not affect non-AI target subtitle checks; use --force-target-existing for that."
+        ),
+    )
 
     p.add_argument(
         "--skip-hi",
@@ -238,7 +262,11 @@ def main() -> int:
         f"Filename tags: {args.src_tag} -> {args.tgt_tag} | HI tag: {args.hi_tag} | "
         f"AI tag: {args.ai_tag if args.ai_tag else '<none>'}"
     )
-    print(f"Skip HI: {args.skip_hi} | Require video: {args.require_video} | Video exts: {', '.join(video_exts)}")
+    print(
+        f"Skip HI: {args.skip_hi} | Require video: {args.require_video} | "
+        f"Force existing target: {args.force_target_existing} | Overwrite AI output: {args.overwrite_ai_existing} | "
+        f"Video exts: {', '.join(video_exts)}"
+    )
     print(f"Translator: {translator_script}")
     if translator_args:
         print(f"Translator args: {' '.join(translator_args)}")
@@ -263,13 +291,13 @@ def main() -> int:
                 continue
 
             existing = find_existing_target_sub(dir_path, cand.prefix, args.tgt_tag, args.hi_tag)
-            if existing is not None:
+            if existing is not None and not args.force_target_existing:
                 print(f"Skipping: {existing} already exists.")
                 continue
 
             out_path = build_output_path(dir_path, cand.prefix, cand.is_hi, args.tgt_tag, args.hi_tag, args.ai_tag)
 
-            if out_path.exists():
+            if out_path.exists() and not args.overwrite_ai_existing:
                 print(f"Skipping: {out_path} already exists.")
                 continue
 
