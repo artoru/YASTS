@@ -1,8 +1,8 @@
 <h1 align="center">YASTS — Yet Another Subtitle Translator Script</h1>
 
-YASTS (Yet Another Subtitle Translator Script) is a standalone CLI tool that translates `.srt` subtitle files locally using a `llama.cpp` server.
+YASTS is a standalone CLI tool that translates `.srt` subtitle files locally using a `llama.cpp` or `vLLM` inference server.
 
-It’s designed first and foremost to keep subtitles **structurally correct** (timings, cue order, and cue boundaries) while still giving the model enough **context** to produce consistent translations — and it’s also **fast**.
+It's designed first and foremost to keep subtitles **structurally correct** (timings, cue order, and cue boundaries) while still giving the model enough **context** to produce consistent translations — and it's also **fast**.
 
 **Primary target model:** [TranslateGemma](https://huggingface.co/collections/google/translategemma) (tested)  
 **Also works well with:** Llama 3–based instruct models (tested)  
@@ -12,11 +12,11 @@ It’s designed first and foremost to keep subtitles **structurally correct** (t
 
 ## Why this exists
 
-If you’ve tried subtitle translation with local LLMs, you’ve probably seen some of these:
+If you've tried subtitle translation with local LLMs, you've probably seen some of these:
 
 - translations improve with context, but large prompts cause truncation or failures
 - models merge/split subtitle segments and you lose alignment with the original SRT structure
-- splitting a sentence across cues makes the model “reconstruct” content across boundaries
+- splitting a sentence across cues makes the model "reconstruct" content across boundaries
 - JSON output occasionally breaks (e.g., unescaped quotes inside strings)
 - line splitting produces awkward 3-line cues even when 2 lines would fit
 
@@ -27,65 +27,67 @@ YASTS is built around sentence-aware grouping, windowed translation, and robust 
 ## Features
 
 - Standalone CLI: translate one `.srt` to another
-- Local inference via `llama.cpp` `llama-server` (no cloud)
+- Local inference via `llama.cpp` `llama-server` or vLLM (OpenAI-compatible endpoint)
+- Optional second-pass review via `yasts-review.py` (run with a different model)
 - Sentence-aware grouping to avoid subtitle boundary corruption
 - Windowed translation with context groups around focus groups
-- Concurrent windows for improved throughput (`--concurrency`, pair with `llama-server --parallel`)
+- Concurrent windows for improved throughput (`--concurrency`, pair with server parallelism)
 - Robust JSON parsing + repair (notably for inner quotes inside `"line"`)
 - Duration-aware split-back when a translation spans multiple subtitle positions
 - Cue-level reflow: wrapping respects the original cue line count
-- Progress reporting: ETA, and optional tokens/sec (if the server returns timing stats)
+- Progress reporting: ETA and optional tokens/sec (if the server returns timing stats)
 
 ---
 
 ## How it works (high level)
 
 1. Parse `.srt` into cues (timestamps + lines)
-2. Flatten cues into internal items (positions) while remembering how to rebuild cues later
+2. Flatten cues into internal items while remembering how to rebuild cues later
 3. Group items into sentence-safe translation units
 4. Create translation windows (focus groups + surrounding context groups)
-5. Translate each window via a text-completion endpoint, requiring structured JSON output
+5. Translate each window via a completion endpoint, requiring structured JSON output
 6. Parse/repair JSON, validate coverage, split translations back into original positions
-7. Rebuild cues and wrap text to the original cue’s line count, then write output `.srt`
+7. Rebuild cues and wrap text to the original cue's line count, then write output `.srt`
+
+Optionally, run `yasts-review.py` on the output to improve idiom, spelling, and wording with a second LLM pass.
 
 ---
 
 ## Reliability: automatic fallback to smaller windows
 
-If a translation request fails (JSON parse error, validation error, timeout, etc.), YASTS automatically retries with a **smaller focus window**.  
-This is especially useful with smaller-context models or occasional model “format drift”.
+If a translation request fails (JSON parse error, validation error, timeout, etc.), YASTS automatically retries with a **smaller focus window**.
 
 Behavior (high level):
 - Try the full window first.
-- On failure, retry up to `max_retries_per_window`.
+- On failure, retry up to `--max-retries`.
 - If failures continue and the window contains multiple groups, YASTS shrinks the focus chunk (typically halving it) and retries.
 - In the worst case, it falls back to translating **one group at a time**.
 
-You can control this with:
-- `--max-retries-per-window`
-- `--shrink-focus-on-retry`
-- `--max-window-chars`
+You can control this with `--max-retries` and `--no-shrink`.
 
 ---
 
 ## Endpoint compatibility
 
-YASTS is implemented against the `llama.cpp` **`/completion`** HTTP endpoint.
+YASTS supports two backends:
 
-It should also work with other **OpenAI-style completion endpoints** (not chat-completions) if they:
-- accept a prompt string
-- return a completion text payload
+- **`llamacpp`** — llama.cpp native `/completion` endpoint
+- **`vllm`** — OpenAI-compatible `/v1/completions` endpoint (default); works with vLLM and any compatible server
 
-This has not been thoroughly tested outside `llama.cpp`, so compatibility reports/PRs are welcome.
+Select with `--backend {llamacpp|vllm}` and point `--url` at your server.
+
+### vLLM note: TranslateGemma model support
+
+As of writing, using [`kaitchup/translategemma-27b-it-autoround-w4a16`](https://huggingface.co/kaitchup/translategemma-27b-it-autoround-w4a16) with vLLM requires building vLLM from PR [vllm-project/vllm#41599](https://github.com/vllm-project/vllm/pull/41599), which adds TranslateGemma model support. The standard vLLM release does not include this yet.
 
 ---
 
 ## Requirements
 
 - Python 3.10+ (3.11+ recommended)
-- A running completion endpoint (tested with `llama.cpp` `llama-server`)
+- A running completion endpoint (llama.cpp `llama-server` or vLLM)
 
-Python dependencies are lightweight (see `requirements.txt`).
+`charset-normalizer` and `json-repair` are bundled in `vendor/` — no separate install needed.
 
 ---
 
@@ -100,7 +102,7 @@ Virtualenv + pip:
 Ubuntu/Debian alternative (system package):
 
     sudo apt update
-    sudo apt install -y python3-httpx python3-charset-normalizer
+    sudo apt install -y python3-httpx
 
 ---
 
@@ -130,25 +132,51 @@ On a system with **2× RTX 5060 Ti 16GB**, the following `llama.cpp` server para
 
 ## Usage
 
-Translate an SRT file:
+### Translate a single SRT file
 
     python3 yasts.py \
       input.en.srt \
       output.fi.srt \
       --src-lang English \
       --tgt-lang Finnish \
+      --backend llamacpp \
       --url http://127.0.0.1:8080/completion \
       --concurrency 4
 
+For vLLM:
+
+    python3 yasts.py \
+      input.en.srt \
+      output.fi.srt \
+      --backend vllm \
+      --url http://127.0.0.1:8180/v1/completions \
+      --model my-model-name \
+      --concurrency 15
+
 Notes:
-- `--parallel 4` (server) + `--concurrency 4` (client) enables 4 in-flight translation windows at a time.
-- If your model has a smaller effective context window than your server `-c`, reduce the client `--max-window-chars` to avoid truncation.
+- `--parallel N` (server) + `--concurrency N` (client) enables N in-flight translation windows at a time.
+- If your model has a smaller effective context window than your server `-c`, reduce `--max-window-chars` to avoid truncation.
+
+---
+
+### Review pass (optional)
+
+Run `yasts-review.py` on a translated file to improve idiom, spelling, and word choice using a second LLM — ideally a different model than the translation pass:
+
+    python3 yasts-review.py \
+      output.fi.srt \
+      reviewed.fi.srt \
+      --backend vllm \
+      --url http://127.0.0.1:8180/v1/completions \
+      --model review-model-name
+
+Add `--with-source` to include the original source text in the review prompt.
 
 ---
 
 ### Batch mode (folder crawler)
 
-`yasts_folder.py` scans a directory tree for source-language `.srt` files and translates them by invoking `yasts.py` per file.  
+`yasts_folder.py` scans a directory tree for source-language `.srt` files and translates them by invoking `yasts.py` per file (alphabetical order within each directory).  
 It skips items that already have a target subtitle, can optionally require a corresponding video file, and supports `--dry-run`.
 
 Any arguments after `--` are passed through verbatim to `yasts.py`:
@@ -160,20 +188,18 @@ Any arguments after `--` are passed through verbatim to `yasts.py`:
 
 ## Defaults and tuning
 
-YASTS ships with sane defaults in `config.py`, and all of them can be overridden via CLI parameters.
+All defaults live in `config.py` (`Settings` dataclass) and can be overridden via CLI.
 
 Key defaults:
 
-Logging
-- `log_level=INFO`
-
 Server / prompt
-- `llama_completion_url=http://127.0.0.1:8671/completion`
-- `prompt_template=gemma3` (templates: `gemma3 | llama3 | qwen3`)
-- `http_timeout_s=120.0`
+- `backend=vllm`, `model_name=gemma`
+- `llama_completion_url=http://127.0.0.1:8180/v1/completions`
+- `prompt_template=gemma3` (templates: `gemma3 | gemma4 | llama3 | qwen3`)
+- `http_timeout_s=180.0`
 
 Sampling
-- `n_predict=2048`, `temperature=0.1`, `top_p=0.90`, `repeat_penalty=1.0`
+- `n_predict=2048`, `temperature=0.04`, `top_p=0.80`, `repeat_penalty=1.1`
 
 Grouping (sentence-ish units)
 - `use_phrase_grouping=True`
@@ -185,7 +211,7 @@ Split-back / display shaping
 
 Windowing / batching
 - `max_window_chars=2000`
-- `context_pre_groups=2`, `context_post_groups=2`
+- `context_pre_groups=1`, `context_post_groups=1`
 - `max_retries_per_window=2`, `shrink_focus_on_retry=True`
 - `concurrency=1` (override to match server parallelism)
 
@@ -194,18 +220,14 @@ Default languages
 
 Tuning tips:
 - If your model has a small context window, reduce `--max-window-chars`.
-- If you want better consistency, increase `--context-pre-groups` / `--context-post-groups` (but watch context limits).
-- For speed, increase `--concurrency` and make sure your server has `--parallel` at least as high.
+- For better consistency, increase `--pre` / `--post` (but watch context limits).
+- For speed, increase `--concurrency` and make sure your server has matching parallelism.
 
 ---
 
 ## Debugging
 
-If a window repeatedly fails (even at size 1), run with:
-
-    python -m yasts.py --log-level DEBUG ...
-
-YASTS logs:
+Run with `--log-level DEBUG` to see:
 - which group IDs were in the focus window
 - prompt size estimates
 - the first part of the model output
@@ -216,7 +238,7 @@ Example:
 
     {"line":"... mutta "valta" on ..."}
 
-YASTS includes a targeted repair step that escapes quotes inside `"line"` fields automatically.
+YASTS includes a targeted repair step that handles unescaped quotes inside `"line"` fields automatically.
 
 ---
 
