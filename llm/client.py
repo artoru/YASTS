@@ -13,6 +13,23 @@ class LlmResponse:
     content: str
 
 
+def extract_content(raw: dict[str, Any]) -> str:
+    choices = raw.get("choices")
+    if isinstance(choices, list) and choices:
+        c0 = choices[0]
+        if isinstance(c0, dict):
+            if isinstance(c0.get("text"), str):
+                return c0["text"]
+            msg = c0.get("message")
+            if isinstance(msg, dict) and isinstance(msg.get("content"), str):
+                return msg["content"]
+    if isinstance(raw.get("content"), str):
+        return raw["content"]
+    if isinstance(raw.get("text"), str):
+        return raw["text"]
+    raise ValueError(f"Unable to extract content from response keys={list(raw.keys())}")
+
+
 @runtime_checkable
 class LlmClient(Protocol):
     async def complete(self, prompt: str) -> LlmResponse: ...

@@ -2,7 +2,8 @@
 from __future__ import annotations
 
 import json
-from typing import Any
+from dataclasses import dataclass
+from typing import Any, Callable
 
 
 def build_system_prompt(src_lang: str, tgt_lang: str) -> str:
@@ -87,14 +88,37 @@ def gemma4_prompt(system_prompt: str, user_json: str) -> str:
     )
 
 
+@dataclass(frozen=True)
+class PromptProfile:
+    stop_tokens: tuple[str, ...]
+    render: Callable[[str, str], str]
+
+
+PROFILES: dict[str, PromptProfile] = {
+    "gemma3": PromptProfile(
+        stop_tokens=("<end_of_turn>", "<start_of_turn>"),
+        render=gemma3_prompt,
+    ),
+    "gemma4": PromptProfile(
+        stop_tokens=("<turn|>", "<|turn>"),
+        render=gemma4_prompt,
+    ),
+    "llama3": PromptProfile(
+        stop_tokens=("<|eot_id|>", "<|end_of_text|>"),
+        render=llama3_prompt,
+    ),
+    "qwen3": PromptProfile(
+        stop_tokens=("<|im_end|>", "<|im_start|>"),
+        render=qwen3_prompt,
+    ),
+}
+
+def get_profile(template: str) -> PromptProfile:
+    key = (template or "").strip().lower()
+    if key not in PROFILES:
+        raise ValueError(f"Unknown prompt template {template!r}. Valid options: {sorted(PROFILES)}")
+    return PROFILES[key]
+
+
 def render_prompt(prompt_template: str, system_prompt: str, user_json: str) -> str:
-    t = (prompt_template or "").strip().lower()
-    if t == "gemma4":
-        return gemma4_prompt(system_prompt, user_json)
-    if t == "gemma3":
-        return gemma3_prompt(system_prompt, user_json)
-    if t == "llama3":
-        return llama3_prompt(system_prompt, user_json)
-    if t == "qwen3":
-        return qwen3_prompt(system_prompt, user_json)
-    return gemma3_prompt(system_prompt, user_json)
+    return get_profile(prompt_template).render(system_prompt, user_json)
